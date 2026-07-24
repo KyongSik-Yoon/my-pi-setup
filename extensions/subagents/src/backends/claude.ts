@@ -310,10 +310,11 @@ const makeClaudeSession = (
       meta: {
         backend: "claude",
         modelLabel: task.model,
-        // Capacity stays unknown until result.modelUsage reports it: init
-        // carries no context window, and a hardcoded guess silently goes
-        // stale as models ship larger ones. Utilization renders as empty
-        // while unknown, which beats a percentage against a wrong capacity.
+        // Capacity is unknown until the getContextUsage probe answers or
+        // result.modelUsage reports it: no message carries it up front, and
+        // a hardcoded guess silently goes stale as models ship larger
+        // windows. Utilization renders as empty while unknown, which beats a
+        // percentage against a wrong capacity.
       } satisfies SubagentMeta as SubagentMeta,
     };
 
@@ -382,6 +383,33 @@ const makeClaudeSession = (
     const updateMeta = (patch: Partial<SubagentMeta>) => {
       state.meta = { ...state.meta, ...patch };
       emit({ _tag: "MetaChanged", meta: patch });
+    };
+
+    /**
+     * Ask the CLI for the context window, since no message carries it before
+     * the first result. `rawMaxTokens` is the model's full window — the same
+     * quantity result.modelUsage reports, and the one occupancy is measured
+     * against — so adopting it early does not make the number jump later.
+     * Control requests require streaming input (this session always uses it)
+     * and may be unsupported on older CLIs, so a failure simply leaves the
+     * capacity unknown.
+     */
+    const probeContextWindow = () => {
+      void nativeQuery
+        .getContextUsage()
+        .then((usage) => {
+          const capacity = usage?.rawMaxTokens;
+          if (state.closed || typeof capacity !== "number" || capacity <= 0) {
+            return;
+          }
+          // A result that landed while this was in flight is authoritative.
+          if (state.meta.contextWindow !== undefined) return;
+          updateMeta({ contextWindow: capacity });
+          emit({ _tag: "UsageChanged", contextWindow: capacity });
+        })
+        .catch(() => {
+          // Probe is best-effort: stay unknown until result.modelUsage.
+        });
     };
 
     const beginQueuedRunIfNeeded = () => {
@@ -516,6 +544,7 @@ const makeClaudeSession = (
           nativeSessionId: message.session_id,
           sessionFilePath: sessionFilePath(message.cwd, message.session_id),
         });
+        if (state.meta.contextWindow === undefined) probeContextWindow();
       } else if (message.type === "stream_event") {
         if (message.parent_tool_use_id !== null) return;
         if (message.event.type === "message_start") {
