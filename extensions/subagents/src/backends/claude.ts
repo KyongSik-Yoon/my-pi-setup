@@ -34,7 +34,6 @@ import type {
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
 
-const CLAUDE_CONTEXT_WINDOW = 200_000;
 const INTERRUPT_TIMEOUT_MS = 2_000;
 const PREVIEW_MAX_LENGTH = 4_096;
 
@@ -311,9 +310,10 @@ const makeClaudeSession = (
       meta: {
         backend: "claude",
         modelLabel: task.model,
-        // Claude models used by this backend currently expose 200k context;
-        // result.modelUsage replaces this fallback when the CLI knows better.
-        contextWindow: CLAUDE_CONTEXT_WINDOW,
+        // Capacity stays unknown until result.modelUsage reports it: init
+        // carries no context window, and a hardcoded guess silently goes
+        // stale as models ship larger ones. Utilization renders as empty
+        // while unknown, which beats a percentage against a wrong capacity.
       } satisfies SubagentMeta as SubagentMeta,
     };
 
@@ -508,11 +508,13 @@ const makeClaudeSession = (
       }
       if (message.type === "system" && message.subtype === "init") {
         beginQueuedRunIfNeeded();
+        // Every steered turn repeats init, so nothing may be re-stamped here
+        // that a completed run has already learned: capacity in particular
+        // stays owned by result.modelUsage.
         updateMeta({
           modelLabel: message.model,
           nativeSessionId: message.session_id,
           sessionFilePath: sessionFilePath(message.cwd, message.session_id),
-          contextWindow: CLAUDE_CONTEXT_WINDOW,
         });
       } else if (message.type === "stream_event") {
         if (message.parent_tool_use_id !== null) return;
